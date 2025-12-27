@@ -10,6 +10,7 @@
 #include "PostProcess/SceneFilterRendering.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
 #include "PostProcess/PostProcessMaterial.h"
+#include "PostProcess/PostProcessDownsample.h"
 #include "SceneTextures.h"
 
 DEFINE_LOG_CATEGORY(LensSceneViewExtensionLog);
@@ -328,6 +329,9 @@ namespace
 			SHADER_PARAMETER_ARRAY(FVector4f, GhostColors, [8])
 			SHADER_PARAMETER_SCALAR_ARRAY(float, GhostScales, [8])
 			SHADER_PARAMETER(float, Intensity)
+			// New Parameters
+			SHADER_PARAMETER_TEXTURE(Texture2D, LensDirt)
+			SHADER_PARAMETER_TEXTURE(Texture2D, StarbrustTexture)
 		END_SHADER_PARAMETER_STRUCT()
 
 		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -481,7 +485,7 @@ void FCompositeLensSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& I
 		UE_LOG(LensSceneViewExtensionLog, Display, TEXT("Invalid World In Scene View."));
 		return;
 	}
-	
+
 	for (const FSceneView* CurrentView : InViewFamily.Views)
 	{
 		if (!CurrentView) continue;
@@ -495,14 +499,14 @@ void FCompositeLensSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& I
 		{
 			APostProcessVolume* PPVolume = Cast<APostProcessVolume>(VolumeInterface);
 			if (!PPVolume || !PPVolume->bEnabled) continue;
-			
+
 			// Lens component
 			const UCompositeLensFlareComponent* LensFlareComponent = PPVolume->FindComponentByClass<UCompositeLensFlareComponent>();
 			if (!LensFlareComponent) continue;
 
 			const bool bIsUnbound = PPVolume->bUnbound;
 			const float Weight = PPVolume->BlendWeight;
-			
+
 			if (bIsUnbound || PPVolume->EncompassesPoint(ViewLocation, 0.f, nullptr))
 			{
 				if (PPVolume->Priority > BestPriority)
@@ -523,12 +527,11 @@ void FCompositeLensSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& I
 			Config = DefaultConfig;
 		}
 	}
-	
 }
 
 void FCompositeLensSceneViewExtension::SubscribeToPostProcessingPass(EPostProcessingPass Pass, const FSceneView& InView, FPostProcessingPassDelegateArray& InOutPassCallbacks, bool bIsPassEnabled)
 {
-	if (Pass == EPostProcessingPass::BeforeDOF)
+	if (Pass == EPostProcessingPass::AfterDOF)
 	{
 		InOutPassCallbacks.Add(FPostProcessingPassDelegate::CreateRaw(this, &FCompositeLensSceneViewExtension::AddLensFlareDOFPass_RenderThread));
 	}
@@ -548,7 +551,7 @@ void FCompositeLensSceneViewExtension::Initialize()
 		Config = DefaultConfig;
 		UE_LOG(LensSceneViewExtensionLog, Display, TEXT("Custom Lens Flare Scene View Initialized"));
 	}
-	
+
 	// Initialize sampler states
 	if (ClearBlendState == nullptr)
 	{
@@ -571,34 +574,34 @@ FScreenPassTexture FCompositeLensSceneViewExtension::AddLensFlareDOFPass_RenderT
 	
 	checkSlow(View.bIsViewInfo);
 	const FViewInfo& ViewInfo = static_cast<const FViewInfo&>(View);
-
+	
 	FScreenPassTextureSlice SceneColorSlice = InOutInputs.GetInput(EPostProcessMaterialInput::SceneColor);
 	FScreenPassTexture SceneColor = FScreenPassTexture::CopyFromSlice(GraphBuilder, SceneColorSlice);
-
+	
 	// Calculate half resolution
 	FIntRect DownsampledRect = ViewInfo.ViewRect / 2;
-
+	
 	// Create texture descriptor with correct size
 	FRDGTextureDesc Desc = SceneColor.Texture->Desc;
 	Desc.Extent = FIntPoint::DivideAndRoundUp(Desc.Extent, 2);
 	Desc.Flags |= TexCreate_RenderTargetable | TexCreate_ShaderResource;
-
+	
 	FRDGTextureRef HalfSceneColorTexture = GraphBuilder.CreateTexture(Desc, TEXT("HalfSceneColor"));
-
+	
 	// Use "ENoAction" since we're writing to the entire texture
 	FScreenPassRenderTarget OutputRT(HalfSceneColorTexture, DownsampledRect, ERenderTargetLoadAction::ENoAction);
-
+	
 	FScreenPassTextureViewport InputViewport(SceneColor);
 	FScreenPassTextureViewport OutputViewport(OutputRT);
-
+	
 	// Downsample pass
 	TShaderMapRef<FCopyRectPS> PixelShader(ViewInfo.ShaderMap);
 	FCopyRectPS::FParameters* PassParameters = GraphBuilder.AllocParameters<FCopyRectPS::FParameters>();
-
+	
 	PassParameters->InputTexture = SceneColor.Texture;
 	PassParameters->InputSampler = TStaticSamplerState<SF_Bilinear>::GetRHI();
 	PassParameters->RenderTargets[0] = OutputRT.GetRenderTargetBinding();
-
+	
 	AddDrawScreenPass(
 		GraphBuilder,
 		RDG_EVENT_NAME("DownsampleForLensFlare"),
@@ -608,15 +611,15 @@ FScreenPassTexture FCompositeLensSceneViewExtension::AddLensFlareDOFPass_RenderT
 		PixelShader,
 		PassParameters
 	);
-
+	
 	FScreenPassTexture HalfSceneColor(HalfSceneColorTexture, DownsampledRect);
 	FScreenPassTextureSlice HalfSceneColorSlice = FScreenPassTextureSlice::CreateFromScreenPassTexture(GraphBuilder, HalfSceneColor);
-
+	
 	FScreenPassTexture CustomBloomInput = SceneColor;
-
+	
 	FScreenPassTexture Output;
 	RenderLensFlare(GraphBuilder, ViewInfo, CustomBloomInput, HalfSceneColorSlice, Output);
-
+	
 	return Output;
 }
 
@@ -770,6 +773,7 @@ void FCompositeLensSceneViewExtension::RenderLensFlare(FRDGBuilder& GraphBuilder
 		{
 			const FTextureRHIRef TextureRHI = Config->Gradient->GetResource()->TextureRHI;
 			PassParameters->GradientTexture = TextureRHI;
+			PassParameters->GradientSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		}
 
 		// Plug in buffers
@@ -875,7 +879,7 @@ FRDGTextureRef FCompositeLensSceneViewExtension::RenderThreshold(FRDGBuilder& Gr
 		OutputTexture,
 		View,
 		Viewport4,
-		1
+		Config->ThresholdBlurSteps
 	);
 }
 
@@ -931,6 +935,7 @@ FRDGTextureRef FCompositeLensSceneViewExtension::RenderFlare(FRDGBuilder& GraphB
 		);
 	}
 
+	if (Config->bEnableGhosts)
 	{
 		const FString PassName("LensFlareGhosts");
 
@@ -952,6 +957,9 @@ FRDGTextureRef FCompositeLensSceneViewExtension::RenderFlare(FRDGBuilder& GraphB
 		PassParameters->Pass.RenderTargets[0] = FRenderTargetBinding(Texture, ERenderTargetLoadAction::ENoAction);
 		PassParameters->InputSampler = BilinearBorderSampler;
 		PassParameters->Intensity = Config->GhostIntensity;
+		// New Parameters
+		PassParameters->LensDirt = Config->LensDirt? Config->LensDirt->GetResource()->TextureRHI: GWhiteTexture->TextureRHI;
+		PassParameters->StarbrustTexture = Config->StarbrustTexture? Config->StarbrustTexture->GetResource()->TextureRHI: GWhiteTexture->TextureRHI;
 
 		PassParameters->GhostColors[0] = Config->Ghost1.Color;
 		PassParameters->GhostColors[1] = Config->Ghost2.Color;
@@ -984,7 +992,12 @@ FRDGTextureRef FCompositeLensSceneViewExtension::RenderFlare(FRDGBuilder& GraphB
 
 		OutputTexture = Texture;
 	}
+	else
+	{
+		OutputTexture = ChromaTexture;
+	}
 
+	if (Config->bEnableHalo)
 	{
 		// Render shader
 		const FString PassName("LensFlareHalo");
@@ -1019,7 +1032,7 @@ FRDGTextureRef FCompositeLensSceneViewExtension::RenderFlare(FRDGBuilder& GraphB
 			OutputTexture,
 			View,
 			Viewport2,
-			1
+			Config->FlareBlurSteps
 		);
 	}
 
