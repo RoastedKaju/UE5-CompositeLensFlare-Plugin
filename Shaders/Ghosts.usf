@@ -1,8 +1,32 @@
 #include "Shared.ush"
 
+float GenerateStarburst(float2 UV, float2 Center, Texture2D StarburstLUT, SamplerState LUTSampler, float Offset)
+{
+    float2 CenterVec = UV - Center;
+    float Dist = length(CenterVec);
+    
+    if (Dist < 0.001f)
+        return 0.0f;
+    
+    float Radial = atan2(CenterVec.y, CenterVec.x) / (2.0f * 3.14159265f) + 0.5f;
+    
+    float Mask1 = Texture2DSample(StarburstLUT, LUTSampler, float2(Radial + Offset * 1.0f, 0.0f)).r;
+    float Mask2 = Texture2DSample(StarburstLUT, LUTSampler, float2(Radial - Offset * 0.5f, 0.0f)).r;
+    
+    float Mask = Mask1 * Mask2;
+
+    Mask = saturate(Mask + (1.0f - smoothstep(0.0f, 0.3f, Dist)));
+    
+    return Mask;
+}
+
 float4 GhostColors[8];
 DECLARE_SCALAR_ARRAY(float, GhostScales, 8);
 float Intensity;
+
+// New Parameters
+Texture2D LensDirt;
+Texture2D StarbrustTexture;
 
 void GhostsPS(
 	in noperspective float4 UVAndScreenPos : TEXCOORD0,
@@ -11,29 +35,41 @@ void GhostsPS(
 	float2 UV = UVAndScreenPos.xy;
 	float3 Color = float3( 0.0f, 0.0f, 0.0f );
 
-	for( int i = 0; i < 8; i++ )
-	{
-		// Skip ghost if size is basically 0
-		if( abs(GhostColors[i].a * GET_SCALAR_ARRAY_ELEMENT(GhostScales, i)) > 0.0001f )
-		{
-			float2 NewUV = (UV - 0.5f) * GET_SCALAR_ARRAY_ELEMENT(GhostScales, i);
+	// Sample the ghost texture
+    float4 GhostTextureSample = Texture2DSample(LensDirt, InputSampler, UV);
+	//float4 StarbrustTextureSample = Texture2DSample(StarbrustTexture, InputSampler, UV);
+    
+    for( int i = 0; i < 8; i++ )
+    {
+        float GhostScale = GET_SCALAR_ARRAY_ELEMENT(GhostScales, i);
+        
+        float2 GhostCenter = 0.5f; 
+        
+        // Skip ghost if size is basically 0
+        if( abs(GhostColors[i].a * GhostScale) > 0.0001f )
+        {
+            float2 NewUV = (UV - GhostCenter) * GhostScale + GhostCenter;
+            
+            float DistToCenter = distance(NewUV, GhostCenter);
+            float Mask = smoothstep(0.4f, 0.9f, 1.0f - DistToCenter); 
+            float Mask2 = smoothstep(0.6f, 1.0f, 1.0f - DistToCenter) * 0.95f + 0.05f;
 
-			// Local mask
-			float DistanceMask = 1.0f - distance( float2(0.0f, 0.0f), NewUV );
-			float Mask  = smoothstep( 0.5f, 0.9f, DistanceMask );
-			float Mask2 = smoothstep( 0.75f, 1.0f, DistanceMask ) * 0.95f + 0.05f;
-
-			Color += Texture2DSample(InputTexture, InputSampler, NewUV + 0.5f ).rgb
-					* GhostColors[i].rgb
-					* GhostColors[i].a
-					* Mask * Mask2;
-		}
-	}
-
+			float Starburst = GenerateStarburst(UV, GhostCenter, StarbrustTexture, InputSampler, 0.0f);
+            
+            // Sample the ghost
+            float3 GhostColor = Texture2DSample(InputTexture, InputSampler, NewUV).rgb
+                    * GhostTextureSample.rgb
+                    * GhostTextureSample.a
+                    * GhostColors[i].rgb
+                    * GhostColors[i].a
+                    * Mask * Mask2;
+            
+            Color += GhostColor * (1.0f + Starburst * 0.8f);
+        }
+    }
+    
 	float2 ScreenPos = UVAndScreenPos.zw;
 	float ScreenborderMask = DiscMask(ScreenPos * 0.9f);
-
 	OutColor.rgb = Color * ScreenborderMask * Intensity;
-
 	OutColor.a = 0;
 }

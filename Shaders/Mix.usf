@@ -67,7 +67,7 @@ void MixPS(
 		saturate( distance(UV, Center) * 2.0f ),
 		0.0f
 	);
-	float3 Gradient = Texture2DSample( GradientTexture, GradientSampler, GradientUV ).rgb;
+	float3 Gradient = Texture2DSample( GradientTexture, GradientSampler, UV ).rgb;
 
 	// Final mix
 	OutColor.rgb += Flares * Gradient * Tint.rgb * Intensity;
