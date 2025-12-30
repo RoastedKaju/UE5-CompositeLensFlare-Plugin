@@ -27,6 +27,17 @@ To use custom lens flare simply enable the plugin in your project and drop in `C
   <img src="docs/add_comp_img.jpg" alt="AppImage01" />
 </div>
 
+### Creating Your Own Presets
+You have to create data assets derived from `` to create new preset, you can use the default config to try out the global settings but it is encouraged to use custom presets along with post process volumes.
+<div align="center">
+  <img src="docs/data_asset_img.jpg" alt="AppImage01" />
+</div>
+
+Open the data asset and play around with settings:
+<div align="center">
+  <img src="docs/settings_img.jpg" alt="AppImage01" />
+</div>
+
 ## ⛰️ Images
 Preset 2 For Dusk and low light scenes.
 <div align="center">
